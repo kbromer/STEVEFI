@@ -1,17 +1,16 @@
 {
   "name": "stevefi",
-  "version": "1.0.0",
-  "description": "",
-  "main": "app.js",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "start": "node app.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "vite"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "dependencies": {
+    "@openai/agents": "^0.2.1",
+    "@openai/agents-realtime": "^0.1.5"
+  },
   "devDependencies": {
-    "eslint": "^9.39.1"
+    "vite": "^5.0.0",
+    "typescript": "^5.6.0"
   }
 }

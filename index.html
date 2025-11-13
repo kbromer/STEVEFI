@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Realtime Voice GPT Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 700px;
+        margin: 2rem auto;
+      }
+      button {
+        padding: 0.5rem 1rem;
+        margin-right: 0.5rem;
+      }
+      #log {
+        margin-top: 1rem;
+        border: 1px solid #ddd;
+        padding: 0.75rem;
+        min-height: 120px;
+        white-space: pre-wrap;
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Realtime Voice Assistant Demo</h1>
+    <p>
+      Click <strong>Connect</strong>, allow microphone access, and start talking.
+      The model will answer out loud.
+    </p>
+
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+
+    <div id="log"></div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
