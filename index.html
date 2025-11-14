@@ -2,39 +2,131 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Realtime Voice GPT Demo</title>
+    <title></title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;600;700&family=Poppins:wght@600;700&display=swap" rel="stylesheet" />
     <style>
+      :root{
+        --bg:#ece6db;
+        --card:#fefdfb;
+        --muted:#8b7d72;
+        --accent:#6b9986;
+        --accent-light:#d4e8e0;
+        --danger:#d9554e;
+        --radius:12px;
+        --shadow: 0 4px 12px rgba(107, 95, 74, 0.08);
+        --shadow-soft: 0 2px 6px rgba(107, 95, 74, 0.04);
+      }
+      html,body{height:100%;margin:0}
       body {
-        font-family: system-ui, sans-serif;
-        max-width: 700px;
-        margin: 2rem auto;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+        background: linear-gradient(180deg, #ece6db 0%, #dfd5c8 60%);
+        color:#3d3530;
+        -webkit-font-smoothing:antialiased;
+        -moz-osx-font-smoothing:grayscale;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        padding:20px;
       }
+      .container{
+        width:100%;
+        max-width:980px;
+        background:transparent;
+      }
+      .card{
+        background:var(--card);
+        border-radius:var(--radius);
+        box-shadow:var(--shadow);
+        padding:22px;
+        display:flex;
+        flex-direction:column;
+        gap:20px;
+        align-items:stretch;
+        border:1px solid rgba(107, 95, 74, 0.1);
+      }
+      .left{flex:1}
+      .right{width:100%}
+      h1{
+        font-family: Onest, Poppins, sans-serif;
+        font-size:28px;
+        font-weight:700;
+        margin:0 0 6px;
+        color:#3d3530;
+        letter-spacing:-0.5px;
+      }
+      p.lead{margin:0;color:var(--muted);font-size:14px}
+      .controls{margin-top:16px;display:flex;gap:10px;align-items:center}
       button {
-        padding: 0.5rem 1rem;
-        margin-right: 0.5rem;
+        padding:10px 14px;border-radius:8px;border:0;background:var(--accent);color:#fff;font-weight:600;cursor:pointer;
+        box-shadow:0 3px 10px rgba(107, 153, 134, 0.15);
+        transition: all 0.2s ease;
       }
-      #log {
-        margin-top: 1rem;
-        border: 1px solid #ddd;
-        padding: 0.75rem;
-        min-height: 120px;
-        white-space: pre-wrap;
-        font-size: 0.9rem;
+      button:hover {
+        background:#5e8a77;
+        box-shadow:0 4px 14px rgba(107, 153, 134, 0.2);
       }
+      button:active {
+        transform: translateY(1px);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      button.secondary{background:var(--accent-light);color:var(--accent);box-shadow:none;border:1px solid rgba(107, 153, 134, 0.2)}
+      button.secondary:hover{background:#c5ddd5}
+      button.danger{background:var(--danger);box-shadow:none}
+      button.danger:hover{background:#cf4844}
+      .status{font-size:13px;color:var(--muted);margin-left:8px}
+      .log{
+        margin-top:12px;border-radius:8px;padding:12px;background:#f5f2ed;border:1px solid rgba(107, 95, 74, 0.12);min-height:160px;color:#5c524a;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', monospace;font-size:13px;white-space:pre-wrap;overflow:auto
+      }
+      .right .panel{background:#f5f3f0;padding:14px;border-radius:10px;border:1px solid rgba(107, 95, 74, 0.08)}
+      label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px;font-weight:500}
+      input[type=file]{display:block}
+      .footer{margin-top:14px;font-size:12px;color:var(--muted)}
+      audio{width:100%;border-radius:8px;margin-top:8px}
+      @media (max-width:880px){.card{flex-direction:column}.right{width:100%}}
     </style>
   </head>
   <body>
-    <h1>Realtime Voice Assistant Demo</h1>
-    <p>
-      Click <strong>Connect</strong>, allow microphone access, and start talking.
-      The model will answer out loud.
-    </p>
+    <div class="container">
+      <div class="card">
+        <div class="left">
+          <h1>Steve-FI — Financial Inclusion Assistant</h1>
+          <p class="lead">Connect with a qualified expert ready to help you navigate financial challenges. Click Connect, allow microphone access on your browser or phone if necessary, and you'll be connected to one of our agents.</p>
+          <p style="margin-top:10px;font-size:13px;color:var(--muted)"><strong>Steve-FI</strong> — Smart Tools for Economic Vitality and Empowerment through Financial Inclusion.</p>
+          <div class="hero" style="margin-top:14px;border-radius:10px;overflow:hidden;box-shadow:0 8px 24px rgba(2,6,23,0.06)">
+            <img src="/images/office.png" alt="Financial inclusion" style="width:100%;height:160px;object-fit:cover;display:block" />
+          </div>
 
-    <button id="connect">Connect</button>
-    <button id="disconnect" disabled>Disconnect</button>
+          <div class="controls">
+            <button id="connect">Connect with an Agent</button>
+            <button id="disconnect" class="secondary" disabled>Disconnect Your Call</button>
+            <div class="status" id="status">Status: <span id="statusText">idle</span></div>
+          </div>
 
-    <div id="log"></div>
+          <div class="log" id="log" aria-live="polite"></div>
+        </div>
+
+        <div class="right">
+          <div class="panel">
+            <div style="display:flex;gap:8px;margin-bottom:12px">
+              <img src="/images/img5.png" alt="placeholder" style="width:100px;height:70px;object-fit:cover;border-radius:8px" />
+              <img src="/images/img6.png" alt="placeholder" style="width:100px;height:70px;object-fit:cover;border-radius:8px" />
+              <img src="/images/img7.png" alt="placeholder" style="width:100px;height:70px;object-fit:cover;border-radius:8px" />
+            </div>
+
+            <label for="imageUpload">Upload documents (if required)</label>
+            <input id="imageUpload" type="file" accept="image/*" />
+
+            <div class="footer">Microphone audio is private and sent only to the realtime engine via the server.</div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="/src/main.js"></script>
   </body>

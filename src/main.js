@@ -1,172 +1,264 @@
-// src/main.js
-import { OpenAIRealtimeWebRTC } from "@openai/agents-realtime";
+// Client-side using Agents Realtime SDK (dynamic import)
+// Set DEBUG to false: SDK will use correct endpoints directly
+const DEBUG = false;
 
-const connectBtn = document.getElementById("connect");
-const disconnectBtn = document.getElementById("disconnect");
-const logDiv = document.getElementById("log");
-const imageUpload = document.getElementById("imageUpload");
+const connectBtn = document.getElementById('connect');
+const disconnectBtn = document.getElementById('disconnect');
+const logDiv = document.getElementById('log');
+const imageUpload = document.getElementById('imageUpload');
 
-let client = null;
+let client = null; // will hold the RealtimeSession from the SDK
 
-function log(message) {
-  logDiv.textContent += message + "\n";
-  logDiv.scrollTop = logDiv.scrollHeight;
+// Instrument RTCPeerConnection.setRemoteDescription to capture SDK internal failures.
+try {
+  const _origSetRemoteDescription = RTCPeerConnection.prototype.setRemoteDescription;
+  RTCPeerConnection.prototype.setRemoteDescription = async function (desc) {
+    try {
+      return await _origSetRemoteDescription.apply(this, arguments);
+    } catch (err) {
+      try {
+        console.error('RTCPeerConnection.setRemoteDescription failed. desc=', desc, 'err=', err && err.message ? err.message : err);
+        try { log('setRemoteDescription failed: ' + (err && err.message ? err.message : String(err))); } catch (e) {}
+          // If the description has an `sdp` property, log that (SessionDescription object)
+          if (desc && typeof desc === 'object' && 'sdp' in desc) {
+            try { console.error('SessionDescription.sdp preview:\n', String(desc.sdp).slice(0, 2000)); } catch (e) { console.error('Unable to read desc.sdp'); }
+          } else if (desc && typeof desc !== 'string') {
+            try { console.error('Description preview (stringified):', JSON.stringify(desc).slice(0, 2000)); } catch (e) { console.error('Unable to serialize desc for logging'); }
+          } else if (desc && typeof desc === 'string') {
+            console.error('SDP preview:\n', String(desc).slice(0, 2000));
+          }
+      } catch (loggingErr) {
+        console.error('Error while logging setRemoteDescription failure', loggingErr);
+      }
+      throw err;
+    }
+  };
+} catch (e) {
+  console.warn('Could not instrument RTCPeerConnection.setRemoteDescription', e);
 }
 
-// ⚠️ For demo only: keep the key here.
-// For anything real, move this to a backend and mint short-lived tokens.
-const OPENAI_API_KEY = "<YOUR_API_KEY_HERE>";
+function log(message) {
+  if (logDiv) {
+    logDiv.textContent += message + '\n';
+    logDiv.scrollTop = logDiv.scrollHeight;
+  }
+  console.log(message);
+}
 
-connectBtn.onclick = async () => {
-  if (client) return;
-
+function setStatus(text) {
   try {
-    connectBtn.disabled = true;
-    log("Requesting microphone permission…");
+    const el = document.getElementById('statusText');
+    if (el) el.textContent = text;
+  } catch (e) {
+    console.debug('setStatus error', e);
+  }
+}
 
-    client = new OpenAIRealtimeWebRTC();
-
-    // Listen to all events; log a few useful ones.
-    client.on("*", (event) => {
-      // Uncomment for full event firehose:
-      // console.log("Realtime event:", event);
-
-      // When the assistant finishes a turn
-      if (event.type === "response.completed") {
-        log("Assistant finished a turn.");
-      }
-
-      // Partial assistant text output (streaming text)
-      if (
-        event.type === "response.output_text.delta" &&
-        event.delta &&
-        event.delta.text
-      ) {
-        log("Assistant (partial): " + event.delta.text);
-      }
-
-      // Simple logging of speech boundary events
-      if (
-        event.type === "input_audio_buffer.speech_started" ||
-        event.type === "input_audio_buffer.speech_stopped"
-      ) {
-        log("Speech event: " + event.type);
-      }
-    });
-
-    // Connect over WebRTC; this will request mic/speaker automatically.
-    await client.connect({
-      apiKey: OPENAI_API_KEY,
-      model: "gpt-4o-mini-realtime-preview",
-      initialSessionConfig: {
-        // ⬇️ Paste your Custom GPT instructions here
-        instructions: `
-          You are Kevin's custom demo assistant in a philanthropy context.
-          Speak clearly and concisely, as if you are in a board meeting with
-          non-technical leaders. If the user uploads an image, describe it and,
-          if it looks like a table or spreadsheet, extract the data in a
-          structured way (like CSV or JSON) and summarize any key insights.
-        `,
-        voice: "ash", // or "alloy", "verse", etc. depending on what’s available
-        modalities: ["text", "audio"],
-        inputAudioFormat: "pcm16",
-        outputAudioFormat: "pcm16",
-        audio: {
-          input: {
-            // Let the model auto-detect when the user stops talking
-            turnDetection: { type: "semantic_vad", interruptResponse: true }
-          }
+// Optional debug fetch wrapper — enabled only when `DEBUG` is truthy.
+if (DEBUG) {
+  (function () {
+    if (typeof window === 'undefined' || !window.fetch) return;
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async function (input, init) {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (url.indexOf('api.openai.com/v1/realtime/calls') !== -1) {
+        const proxyUrl = '/webrtc/call';
+        try {
+          const proxyInit = Object.assign({}, init || {}, { headers: (init && init.headers) || {} });
+          if (proxyInit.headers && proxyInit.headers.Authorization) delete proxyInit.headers.Authorization;
+          const proxyResp = await originalFetch(proxyUrl, proxyInit);
+          return proxyResp;
+        } catch (err) {
+          console.debug('[fetch-proxy] error forwarding to /webrtc/call:', err);
         }
       }
-    });
 
-    log("Connected. Start talking!");
+      const method = (init && init.method) || (typeof input === 'object' && input.method) || 'GET';
+      const reqBody = init && init.body ? String(init.body).slice(0, 2000) : undefined;
+      try {
+        if (url.indexOf('/v1/realtime/calls') !== -1 || url.indexOf('/v1/realtime/sessions') !== -1) {
+          const outMsg = `[fetch-debug-req] ${method} ${url} body: ${reqBody || '<no-body>'}`;
+          console.debug(outMsg);
+          try { log(outMsg); } catch (e) {}
+        }
+      } catch (e) {
+        console.debug('[fetch-debug] error reading request data:', e);
+      }
 
-    connectBtn.disabled = true;
-    disconnectBtn.disabled = false;
-  } catch (err) {
-    console.error(err);
-    log("Error connecting: " + (err && err.message ? err.message : err));
-    connectBtn.disabled = false;
-    disconnectBtn.disabled = true;
-    client = null;
-  }
-};
+      const resp = await originalFetch(input, init);
+      try {
+        if (url.indexOf('/v1/realtime/calls') !== -1 || url.indexOf('/v1/realtime/sessions') !== -1) {
+          const cloned = resp.clone();
+          const text = await cloned.text();
+          const msg = `[fetch-debug-resp] ${url} status: ${resp.status} body: ${text}`;
+          console.debug(msg);
+          try { log(msg); } catch (e) {}
+        }
+      } catch (e) {
+        console.debug('[fetch-debug] error reading response:', e);
+        try { log('[fetch-debug] error reading response: ' + String(e)); } catch (e2) {}
+      }
+      return resp;
+    };
+  })();
+}
 
-disconnectBtn.onclick = async () => {
-  if (!client) return;
+async function getEphemeralSession() {
+  const resp = await fetch('/session', { method: 'POST' });
+  if (!resp.ok) throw new Error('Failed to get ephemeral session');
+  const data = await resp.json();
+  return data;
+}
+
+async function startSdkSession() {
+  setStatus('creating ephemeral session…');
+  const sessionResp = await getEphemeralSession();
+  const ephemeralKey = sessionResp.apiKey || null;
+  const instructions = sessionResp.instructions || 'You are a helpful assistant.';
+  if (!ephemeralKey) throw new Error('No ephemeral key returned from /session');
+
   try {
-    await client.close();
-    log("Disconnected from Realtime API.");
+    setStatus('loading SDK…');
+    const sdk = await import('@openai/agents-realtime');
+    const { RealtimeAgent, RealtimeSession } = sdk;
+
+    const agent = new RealtimeAgent({ name: 'Assistant', instructions });
+    const sdkSession = new RealtimeSession(agent);
+
+    setStatus('connecting via SDK…');
+    // Pass apiKey (ephemeral key) to connect; SDK handles WebRTC internally
+    await sdkSession.connect({ apiKey: ephemeralKey });
+
+    client = sdkSession;
+    log('Connected via Agents SDK.');
+    setStatus('connected');
+    if (connectBtn) connectBtn.disabled = true;
+    if (disconnectBtn) disconnectBtn.disabled = false;
+
+    // Send auto-greeting message after successful connection
+    try {
+      setStatus('sending greeting…');
+      sdkSession.transport.sendEvent({
+        type: 'conversation.item.create',
+        item: {
+          type: 'message',
+          role: 'assistant',
+          content: [
+            {
+              type: 'input_text',
+              text: 'Hi, my name is Ash with STEVE-FI. I am here to help you with financial resources and guidance. May I ask who I am speaking with?',
+            },
+          ],
+        },
+      });
+
+      // Trigger response creation to ensure the agent speaks the greeting
+      sdkSession.transport.sendEvent({
+        type: 'response.create',
+      });
+
+      log('Greeting message sent.');
+      setStatus('connected');
+    } catch (greetErr) {
+      console.warn('Error sending greeting:', greetErr);
+      log('Note: Greeting could not be sent, but session is connected.');
+    }
   } catch (err) {
-    console.error(err);
-    log("Error disconnecting: " + (err && err.message ? err.message : err));
-  } finally {
-    client = null;
-    connectBtn.disabled = false;
-    disconnectBtn.disabled = true;
+    console.error('SDK connection failed:', err);
+    setStatus('error');
+    throw err;
   }
-};
+}
 
-// --- Image upload → vision call via Realtime ---
+if (connectBtn) {
+  connectBtn.onclick = async () => {
+    try {
+      connectBtn.disabled = true;
+      setStatus('connecting…');
+      await startSdkSession();
+    } catch (err) {
+      console.error(err);
+      log('Error connecting: ' + (err && err.message ? err.message : err));
+      if (connectBtn) connectBtn.disabled = false;
+      if (disconnectBtn) disconnectBtn.disabled = true;
+    }
+  };
+} else {
+  console.warn('No element with id "connect" found in DOM. Connection button disabled.');
+}
 
-imageUpload.onchange = (e) => {
-  if (!client) {
-    log("Connect first, then upload an image.");
-    imageUpload.value = "";
-    return;
-  }
+if (disconnectBtn) {
+  disconnectBtn.onclick = async () => {
+    try {
+      if (client) {
+        // Try to disconnect the SDK session
+        if (typeof client.disconnect === 'function') {
+          try { 
+            await client.disconnect(); 
+            log('Disconnected via SDK.');
+          } catch (e) { 
+            console.warn('Error calling disconnect():', e); 
+            log('Warning: error during disconnect: ' + (e && e.message ? e.message : e));
+          }
+        } else if (typeof client.close === 'function') {
+          // Fallback: try close() if disconnect doesn't exist
+          try { 
+            await client.close(); 
+            log('Closed via SDK.');
+          } catch (e) { 
+            console.warn('Error calling close():', e); 
+          }
+        } else {
+          log('Client has no disconnect/close method. Clearing local reference.');
+        }
+        client = null;
+        setStatus('idle');
+        if (connectBtn) connectBtn.disabled = false;
+        if (disconnectBtn) disconnectBtn.disabled = true;
+      } else {
+        log('No active session to disconnect.');
+        setStatus('idle');
+        if (connectBtn) connectBtn.disabled = false;
+        if (disconnectBtn) disconnectBtn.disabled = true;
+      }
+    } catch (err) {
+      console.error(err);
+      log('Error disconnecting: ' + (err && err.message ? err.message : err));
+      setStatus('error');
+    }
+  };
+} else {
+  console.warn('No element with id "disconnect" found in DOM.');
+}
 
-  const file = e.target.files[0];
-  if (!file) return;
-
-  // Use FileReader to get a base64 string from the image
-  const reader = new FileReader();
-  reader.onload = () => {
-    const dataUrl = reader.result; // e.g. "data:image/png;base64,AAAA..."
-    const parts = String(dataUrl).split(",");
-    if (parts.length !== 2) {
-      log("Could not read image data.");
+if (imageUpload) {
+  imageUpload.onchange = (e) => {
+    if (!client) {
+      log('Connect first, then upload an image.');
+      imageUpload.value = '';
       return;
     }
-    const base64 = parts[1];
-    const format = (file.type || "image/png").split("/")[1]; // "png", "jpeg", etc.
-
-    // Create a user message with text + image
-    client.send({
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text:
-              "Here is an image. " +
-              "If it contains a table or spreadsheet, extract it as CSV and summarize it. " +
-              "Otherwise just describe what's in the image."
-          },
-          {
-            type: "input_image",
-            image: {
-              base64: base64,
-              format: format
-            }
-          }
-        ]
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const parts = String(dataUrl).split(',');
+      if (parts.length !== 2) { log('Could not read image data.'); return; }
+      const base64 = parts[1];
+      const format = (file.type || 'image/png').split('/')[1];
+      try {
+        client.send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [ { type: 'input_text', text: 'Here is an image. If it contains a table or spreadsheet, extract it as CSV and summarize it. Otherwise just describe what\'s in the image.' }, { type: 'input_image', image: { base64: base64, format: format } } ] } });
+        client.send({ type: 'response.create' });
+        log('Image sent to assistant for analysis.');
+      } catch (e) {
+        console.warn('Error sending image to SDK session', e);
       }
-    });
-
-    // Ask the assistant to respond
-    client.send({ type: "response.create" });
-
-    log("Image sent to assistant for analysis.");
-    imageUpload.value = "";
+      imageUpload.value = '';
+    };
+    reader.onerror = () => log('Error reading image file.');
+    reader.readAsDataURL(file);
   };
-
-  reader.onerror = () => {
-    log("Error reading image file.");
-  };
-
-  reader.readAsDataURL(file);
-};
+} else {
+  if (DEBUG) console.warn('No element with id "imageUpload" found in DOM.');
+}

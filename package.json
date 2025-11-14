@@ -3,11 +3,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite"
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server.js",
+    "heroku-postbuild": "npm run build"
   },
   "dependencies": {
     "@openai/agents": "^0.2.1",
-    "@openai/agents-realtime": "^0.1.5"
+    "@openai/agents-realtime": "^0.1.5",
+    "express": "^4.18.2",
+    "dotenv": "^16.1.4"
   },
   "devDependencies": {
     "vite": "^5.0.0",
