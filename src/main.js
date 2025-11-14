@@ -38,7 +38,7 @@ function sendEventSafe(evt) {
     client.transport.sendEvent(evt);
     return true;
   } catch (e) {
-    console.warn('sendEvent failed:', e);
+    // console.warn('sendEvent failed:', e); // Silenced for cleaner UI
     log('sendEvent failed: ' + (e?.message || e));
     setStatus('disconnected');
     return false;
@@ -58,9 +58,9 @@ function queueOrTriggerResponse() {
         output_modalities: ['audio']
       },
     });
-    log('Response requested from agent.');
+    //log('Response requested from agent.');
   } catch (e) {
-    console.warn('Failed to trigger response', e);
+    // console.warn('Failed to trigger response', e); // Silenced for cleaner UI
     log('Error triggering response: ' + (e?.message || e));
   }
 }
@@ -71,7 +71,7 @@ function processQueuedResponses() {
     const next = queuedResponseInputs.shift();
     if (next) queueOrTriggerResponse();
   } catch (e) {
-    console.warn('Error processing queued responses', e);
+    // console.warn('Error processing queued responses', e); // Silenced for cleaner UI
   }
 }
 
@@ -86,7 +86,7 @@ function scheduleResponseFallback(delayMs = 350) {
       }
     }, delayMs);
   } catch (e) {
-    console.debug('scheduleResponseFallback error', e);
+    // console.debug('scheduleResponseFallback error', e); // Silenced for cleaner UI
   }
 }
 
@@ -102,20 +102,20 @@ try {
         try { log('setRemoteDescription failed: ' + (err && err.message ? err.message : String(err))); } catch (e) {}
           // If the description has an `sdp` property, log that (SessionDescription object)
           if (desc && typeof desc === 'object' && 'sdp' in desc) {
-            try { console.error('SessionDescription.sdp preview:\n', String(desc.sdp).slice(0, 2000)); } catch (e) { console.error('Unable to read desc.sdp'); }
+            // Silenced for cleaner UI
           } else if (desc && typeof desc !== 'string') {
-            try { console.error('Description preview (stringified):', JSON.stringify(desc).slice(0, 2000)); } catch (e) { console.error('Unable to serialize desc for logging'); }
+            // Silenced for cleaner UI
           } else if (desc && typeof desc === 'string') {
-            console.error('SDP preview:\n', String(desc).slice(0, 2000));
+            // Silenced for cleaner UI
           }
       } catch (loggingErr) {
-        console.error('Error while logging setRemoteDescription failure', loggingErr);
+        // Silenced for cleaner UI
       }
       throw err;
     }
   };
 } catch (e) {
-  console.warn('Could not instrument RTCPeerConnection.setRemoteDescription', e);
+  // console.warn('Could not instrument RTCPeerConnection.setRemoteDescription', e); // Silenced for cleaner UI
 }
 
 function log(message) {
@@ -123,7 +123,7 @@ function log(message) {
     logDiv.textContent += message + '\n';
     logDiv.scrollTop = logDiv.scrollHeight;
   }
-  console.log(message);
+  // console.log(message); // Silenced for cleaner UI
 }
 
 function setStatus(text) {
@@ -131,7 +131,7 @@ function setStatus(text) {
     const el = document.getElementById('statusText');
     if (el) el.textContent = text;
   } catch (e) {
-    console.debug('setStatus error', e);
+    // console.debug('setStatus error', e); // Silenced for cleaner UI
   }
 }
 
@@ -150,7 +150,7 @@ if (DEBUG) {
           const proxyResp = await originalFetch(proxyUrl, proxyInit);
           return proxyResp;
         } catch (err) {
-          console.debug('[fetch-proxy] error forwarding to /webrtc/call:', err);
+          // console.debug('[fetch-proxy] error forwarding to /webrtc/call:', err); // Silenced for cleaner UI
         }
       }
 
@@ -158,12 +158,11 @@ if (DEBUG) {
       const reqBody = init && init.body ? String(init.body).slice(0, 2000) : undefined;
       try {
         if (url.indexOf('/v1/realtime/calls') !== -1 || url.indexOf('/v1/realtime/sessions') !== -1) {
-          const outMsg = `[fetch-debug-req] ${method} ${url} body: ${reqBody || '<no-body>'}`;
-          console.debug(outMsg);
+          // const outMsg = `[fetch-debug-req] ${method} ${url} body: ${reqBody || '<no-body>'}`;
           try { log(outMsg); } catch (e) {}
         }
       } catch (e) {
-        console.debug('[fetch-debug] error reading request data:', e);
+        // console.debug('[fetch-debug] error reading request data:', e); // Silenced for cleaner UI
       }
 
       const resp = await originalFetch(input, init);
@@ -172,11 +171,11 @@ if (DEBUG) {
           const cloned = resp.clone();
           const text = await cloned.text();
           const msg = `[fetch-debug-resp] ${url} status: ${resp.status} body: ${text}`;
-          console.debug(msg);
+          // console.debug(msg); // Silenced for cleaner UI
           try { log(msg); } catch (e) {}
         }
       } catch (e) {
-        console.debug('[fetch-debug] error reading response:', e);
+        // console.debug('[fetch-debug] error reading response:', e); // Silenced for cleaner UI
         try { log('[fetch-debug] error reading response: ' + String(e)); } catch (e2) {}
       }
       return resp;
@@ -192,7 +191,13 @@ async function getEphemeralSession() {
 }
 
 async function startSdkSession() {
-  setStatus('creating ephemeral session…');
+  setStatus('Connecting you to a financial inclusion specialist…');
+
+  // Simulate a short delay for "finding a specialist"
+  await new Promise(res => setTimeout(res, 1200));
+  setStatus('Locating an available specialist…');
+  await new Promise(res => setTimeout(res, 1200));
+
   const sessionResp = await getEphemeralSession();
   const ephemeralKey = sessionResp.apiKey || null;
   const instructions = sessionResp.instructions || 'You are a helpful assistant.';
@@ -200,19 +205,18 @@ async function startSdkSession() {
   if (!ephemeralKey) throw new Error('No ephemeral key returned from /session');
 
   try {
-    setStatus('loading SDK…');
+    setStatus('Connecting you now…');
     const sdk = await import('@openai/agents-realtime');
     const { RealtimeAgent, RealtimeSession } = sdk;
 
     const agent = new RealtimeAgent({ name: 'Assistant', instructions });
     const sdkSession = new RealtimeSession(agent);
 
-    setStatus('connecting via SDK…');
+    setStatus('Establishing secure connection…');
     await sdkSession.connect({ apiKey: ephemeralKey });
 
     client = sdkSession;
-    log('Connected via Agents SDK.');
-    setStatus('connected');
+    setStatus('You are now connected to Ash, your STEVE-FI financial inclusion specialist.');
     if (connectBtn) connectBtn.disabled = true;
     if (disconnectBtn) disconnectBtn.disabled = false;
 
@@ -229,9 +233,7 @@ async function startSdkSession() {
                 threshold: 0.5,
                 prefix_padding_ms: 300,
                 silence_duration_ms: 300,
-                // We'll manually create responses after injecting KB/user context
                 create_response: false,
-                // Never interrupt current agent speech
                 interrupt_response: false,
               },
             },
@@ -241,21 +243,20 @@ async function startSdkSession() {
         },
       });
       autoCreateResponses = false;
-      log('Session updated: prevent interruptions; manual responses will be created.');
+      setStatus('Session active');
     } catch (e) {
-      console.warn('Failed to send session.update', e);
+      // Silenced for cleaner UI
     }
 
-    // Listen for transport events to monitor document processing (cover both server.* and plain names)
+
+    // Restore event-driven context and response flow
     const markInFlight = (label, evt) => {
       inFlightResponse = true;
-      console.debug(label, evt);
-      log(label);
+      // Silenced: log(label);
     };
     const clearInFlight = (label, evt) => {
       inFlightResponse = false;
-      console.debug(label, evt);
-      log(label);
+      // Silenced: log(label);
       const currentStatus = document.getElementById('statusText')?.textContent || '';
       if (currentStatus.includes('waiting for agent')) setStatus('connected');
       processQueuedResponses();
@@ -272,16 +273,10 @@ async function startSdkSession() {
     sdkSession.transport.on('server.response.done', (e) => clearInFlight('server.response.done', e));
 
     // Additional helpful events
-    sdkSession.transport.on('response.output_audio_transcript.delta', (e) => {
-      try { if (e && e.delta) console.debug('[transcript]', e.delta); } catch {}
-    });
-    sdkSession.transport.on('response.output_audio_transcript.done', (e) => {
-      try { if (e && e.transcript) console.debug('[transcript.done]', e.transcript); } catch {}
-    });
-    sdkSession.transport.on('conversation.item.added', (e) => { try { log('conversation.item.added'); } catch {} });
+    sdkSession.transport.on('conversation.item.added', (e) => { try { /* log('conversation.item.added'); */ } catch {} });
     sdkSession.transport.on('conversation.item.created', async (e) => {
       try {
-        log('conversation.item.created');
+        // log('conversation.item.created');
         // Intentionally do not trigger response here; wait for item.done
       } catch {}
     });
@@ -289,14 +284,14 @@ async function startSdkSession() {
       try {
         const item = e && (e.item || e.data || e.payload || e);
         if (!autoCreateResponses && item && item.type === 'message' && item.role === 'user') {
-          log('Server user turn detected; requesting response…');
+          // log('Server user turn detected; requesting response…');
           queueOrTriggerResponse();
         }
       } catch {}
     });
     sdkSession.transport.on('conversation.item.done', async (e) => {
       try {
-        log('conversation.item.done');
+        // log('conversation.item.done');
         const item = e && (e.item || e.data || e.payload || e);
         if (item && item.type === 'message' && item.role === 'user') {
           if (!suppressKBNextTurn) {
@@ -316,21 +311,21 @@ async function startSdkSession() {
                   if (kbContext) {
                     const instr = buildInstructions();
                     sendEventSafe({ type: 'session.update', session: { type: 'realtime', instructions: instr } });
-                    log(`KB context applied (${kbContext.length} chars).`);
+                    // log(`KB context applied (${kbContext.length} chars).`);
                   }
                 } else {
-                  try { log('KB retrieval failed: ' + await resp.text()); } catch {}
+                  try { /* log('KB retrieval failed: ' + await resp.text()); */ } catch {}
                 }
               }
             } catch (kbErr) {
-              console.debug('KB retrieval error', kbErr);
+              // console.debug('KB retrieval error', kbErr);
             }
           } else {
             suppressKBNextTurn = false;
           }
 
           if (!autoCreateResponses) {
-            log('User turn done; requesting response…');
+            // log('User turn done; requesting response…');
             queueOrTriggerResponse();
           }
         }
@@ -339,32 +334,31 @@ async function startSdkSession() {
     sdkSession.transport.on('error', (e) => {
       inFlightResponse = false;
       console.error('error:', e);
-      log('Error event: ' + JSON.stringify(e));
+      setStatus('Session error');
       processQueuedResponses();
     });
     // Connection state hints (best-effort)
     sdkSession.transport.on('open', () => { 
       transportConnected = true; 
       try { 
-        log('transport.open'); 
         setStatus('connected');
         if (connectBtn) connectBtn.disabled = true;
-        if (disconnectBtn) disconnectBtn.disabled = false;
+        if (disconnectBtn) connectBtn.disabled = false;
       } catch {}
     });
     sdkSession.transport.on('close', () => { 
       transportConnected = false; 
       try { 
-        log('transport.close'); 
         setStatus('disconnected');
         if (connectBtn) connectBtn.disabled = false;
-        if (disconnectBtn) disconnectBtn.disabled = true;
+        if (disconnectBtn) connectBtn.disabled = true;
       } catch {}
     });
 
-    // Send auto-greeting message after successful connection
+    // Send staged greeting after connection
     try {
-      setStatus('sending greeting…');
+      setStatus('Ash is joining the call…');
+      await new Promise(res => setTimeout(res, 1200));
       sdkSession.transport.sendEvent({
         type: 'conversation.item.create',
         item: {
@@ -376,10 +370,9 @@ async function startSdkSession() {
         },
       });
       sdkSession.transport.sendEvent({ type: 'response.create' });
-      log('Greeting message sent.');
       setStatus('connected');
     } catch (greetErr) {
-      console.warn('Error sending greeting:', greetErr);
+      // console.warn('Error sending greeting:', greetErr); // Silenced for cleaner UI
       log('Note: Greeting could not be sent, but session is connected.');
     }
   } catch (err) {
@@ -525,7 +518,7 @@ if (imageUpload) {
           userDocContext += docBlock;
           const newInstructions = `${baseInstructions}\n\n[User Documents]\nThe following content comes from the caller's own financial documents. Use it for analysis for this caller only. Do not confuse it with general reference materials.${userDocContext}`;
           const ok = sendEventSafe({ type: 'session.update', session: { type: 'realtime', instructions: newInstructions } });
-          if (ok) log(`Session instructions updated with user PDF context (${Math.min(pdfText.length, MAX_CHARS)} chars).`);
+          if (ok) log(`Document received and processed: (${Math.min(pdfText.length, MAX_CHARS)} chars).`);
 
           suppressKBNextTurn = true;
           const textOnly = {
@@ -615,5 +608,5 @@ if (imageUpload) {
     }
   };
 } else {
-  if (DEBUG) console.warn('No element with id "imageUpload" found in DOM.');
+  // if (DEBUG) console.warn('No element with id "imageUpload" found in DOM.'); // Silenced for cleaner UI
 }
