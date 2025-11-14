@@ -135,6 +135,25 @@ async function startSdkSession() {
     if (connectBtn) connectBtn.disabled = true;
     if (disconnectBtn) disconnectBtn.disabled = false;
 
+    // Listen for transport events to monitor document processing
+    sdkSession.transport.on('server.response.created', (event) => {
+      console.debug('Response created:', event);
+    });
+    
+    sdkSession.transport.on('server.response.done', (event) => {
+      console.debug('Response completed:', event);
+      // If we were waiting for a document response, update status
+      const currentStatus = document.getElementById('statusText')?.textContent || '';
+      if (currentStatus.includes('waiting for agent')) {
+        setStatus('connected');
+      }
+    });
+    
+    sdkSession.transport.on('server.error', (event) => {
+      console.error('Server error:', event);
+      log('Error from server: ' + JSON.stringify(event));
+    });
+
     // Send auto-greeting message after successful connection
     try {
       setStatus('sending greeting…');
@@ -231,33 +250,162 @@ if (disconnectBtn) {
   console.warn('No element with id "disconnect" found in DOM.');
 }
 
+// PDF to image conversion helper
+async function convertPdfToImages(file) {
+  const pdfjsLib = await import('pdfjs-dist');
+  // Set worker source - use unpkg for reliable CDN delivery
+  const pdfjsVersion = pdfjsLib.version || '4.0.379';
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsVersion}/build/pdf.worker.min.mjs`;
+  
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const images = [];
+  
+  // Convert each page to an image (limit to first 5 pages for performance)
+  const maxPages = Math.min(pdf.numPages, 5);
+  for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 2.0 });
+    
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    
+    await page.render({ canvasContext: context, viewport }).promise;
+    
+    // Convert canvas to base64 PNG
+    const dataUrl = canvas.toDataURL('image/png');
+    const base64 = dataUrl.split(',')[1];
+    images.push({ base64, format: 'png', pageNum });
+  }
+  
+  return images;
+}
+
 if (imageUpload) {
-  imageUpload.onchange = (e) => {
+  imageUpload.onchange = async (e) => {
     if (!client) {
-      log('Connect first, then upload an image.');
+      log('Connect first, then upload a document.');
       imageUpload.value = '';
       return;
     }
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result;
-      const parts = String(dataUrl).split(',');
-      if (parts.length !== 2) { log('Could not read image data.'); return; }
-      const base64 = parts[1];
-      const format = (file.type || 'image/png').split('/')[1];
-      try {
-        client.send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [ { type: 'input_text', text: 'Here is an image. If it contains a table or spreadsheet, extract it as CSV and summarize it. Otherwise just describe what\'s in the image.' }, { type: 'input_image', image: { base64: base64, format: format } } ] } });
-        client.send({ type: 'response.create' });
-        log('Image sent to assistant for analysis.');
-      } catch (e) {
-        console.warn('Error sending image to SDK session', e);
+    
+    try {
+      // Check if it's a PDF
+      if (file.type === 'application/pdf') {
+        setStatus('Converting PDF...');
+        log('Converting PDF to images...');
+        
+        const images = await convertPdfToImages(file);
+        log(`PDF converted: ${images.length} page(s)`);
+        
+        // Send all pages in a single message with multiple image content items
+        const content = [];
+        
+        // Add text introduction
+        content.push({
+          type: 'input_text',
+          text: `I have uploaded a PDF document with ${images.length} page(s) for you to analyze. Please review it and provide insights.`
+        });
+        
+        // Add all images with proper data URL format via image_url
+        for (let i = 0; i < images.length; i++) {
+          const { base64 } = images[i];
+          content.push({
+            type: 'input_image',
+            image_url: `data:image/png;base64,${base64}`
+          });
+        }
+
+        // Build a single message item to reuse for response input to avoid race conditions
+        const pdfMessageItem = {
+          type: 'message',
+          role: 'user',
+          content
+        };
+
+        // Send single message with all content for history, then trigger response with the same input
+        try {
+          client.transport.sendEvent({
+            type: 'conversation.item.create',
+            item: pdfMessageItem
+          });
+
+          log('PDF pages sent to assistant for analysis.');
+
+          // Trigger a response using the same message as input to avoid timing issues
+          client.transport.sendEvent({
+            type: 'response.create',
+            response: {
+              conversation: 'none',
+              output_modalities: ['audio'],
+              input: [ pdfMessageItem ]
+            }
+          });
+          log('Response requested from agent.');
+          setStatus('PDF sent - agent should respond');
+
+        } catch (sendErr) {
+          console.error('Error sending PDF:', sendErr);
+          log('Error sending PDF: ' + (sendErr?.message || sendErr));
+          setStatus('error sending document');
+        }
+      } else {
+        // Handle regular images
+        setStatus('Analyzing image...');
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result; // Already in the format: data:image/...;base64,...
+          if (!dataUrl) { log('Could not read image data.'); return; }
+          try {
+            const imageMessageItem = {
+              type: 'message',
+              role: 'user',
+              content: [
+                { type: 'input_text', text: 'I have uploaded a document for you to analyze. Please review it and provide insights.' },
+                { type: 'input_image', image_url: String(dataUrl) }
+              ]
+            };
+
+            // Add to conversation history
+            client.transport.sendEvent({
+              type: 'conversation.item.create',
+              item: imageMessageItem
+            });
+
+            log('Document sent to assistant for analysis.');
+
+            // Trigger a response using the same message as input (out-of-band)
+            client.transport.sendEvent({
+              type: 'response.create',
+              response: {
+                conversation: 'none',
+                output_modalities: ['audio'],
+                input: [ imageMessageItem ]
+              }
+            });
+            log('Response requested from agent.');
+            setStatus('Image sent - agent should respond');
+
+          } catch (e) {
+            console.warn('Error sending image to SDK session', e);
+            log('Error: ' + (e?.message || e));
+            setStatus('error sending document');
+          }
+        };
+        reader.onerror = () => log('Error reading image file.');
+        reader.readAsDataURL(file);
       }
+    } catch (err) {
+      console.error('Error processing file:', err);
+      log('Error processing file: ' + (err?.message || err));
+      setStatus('error');
+    } finally {
       imageUpload.value = '';
-    };
-    reader.onerror = () => log('Error reading image file.');
-    reader.readAsDataURL(file);
+    }
   };
 } else {
   if (DEBUG) console.warn('No element with id "imageUpload" found in DOM.');
