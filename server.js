@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import dotenv from 'dotenv';
+import { ingestPdfs, loadIndex, saveIndex, searchIndex, buildContext } from './server/context.js';
 
 // Load environment from .env.local if present
 dotenv.config({ path: '.env.local' });
@@ -12,6 +13,11 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = process.env.PORT || 3000;
+const embeddingsModel = process.env.EMBEDDINGS_MODEL || 'text-embedding-3-small';
+const dataDir = path.join(__dirname, 'data');
+const pdfsDir = path.join(dataDir, 'pdfs');
+const indexPath = path.join(dataDir, 'index.json');
+const autoIngestOnStart = (process.env.AUTO_INGEST_ON_START || 'true').toLowerCase() === 'true';
 
 // Read canonical prompt at startup (synchronous for simplicity)
 let canonicalPrompt = '';
@@ -74,6 +80,55 @@ app.post('/session', express.json(), async (req, res) => {
   } catch (err) {
     console.error('Error creating ephemeral client secret in /session:', err);
     return res.status(500).json({ error: 'internal_error' });
+  }
+});
+
+// Admin: ingest PDFs in data/pdfs into data/index.json
+app.post('/admin/ingest', async (req, res) => {
+  const serverKey = process.env.OPENAI_API_KEY || '';
+  if (!serverKey) return res.status(500).json({ error: 'Server missing OPENAI_API_KEY' });
+  try {
+    const index = await ingestPdfs({ pdfDir: pdfsDir, indexPath, apiKey: serverKey, model: embeddingsModel });
+    return res.json({ ok: true, files: index.meta.files, items: index.items.length });
+  } catch (e) {
+    console.error('Ingest error:', e);
+    return res.status(500).json({ error: 'ingest_failed', message: e?.message || String(e) });
+  }
+});
+
+// Search index for top-k chunks
+app.get('/context/search', async (req, res) => {
+  const serverKey = process.env.OPENAI_API_KEY || '';
+  if (!serverKey) return res.status(500).json({ error: 'Server missing OPENAI_API_KEY' });
+  const q = req.query.q || req.query.query || '';
+  const k = Math.max(1, Math.min(50, parseInt(req.query.k || '5', 10)));
+  const index = loadIndex(indexPath);
+  if (!q) return res.status(400).json({ error: 'missing_query' });
+  if (!index || !index.items?.length) return res.status(404).json({ error: 'index_empty' });
+  try {
+    const results = await searchIndex({ index, apiKey: serverKey, model: embeddingsModel, query: q, k });
+    return res.json({ query: q, k, results });
+  } catch (e) {
+    console.error('Search error:', e);
+    return res.status(500).json({ error: 'search_failed', message: e?.message || String(e) });
+  }
+});
+
+// Build a context block from top-k search results
+app.post('/context/augment', express.json(), async (req, res) => {
+  const serverKey = process.env.OPENAI_API_KEY || '';
+  if (!serverKey) return res.status(500).json({ error: 'Server missing OPENAI_API_KEY' });
+  const { query, k = 5, maxChars = 8000 } = req.body || {};
+  if (!query) return res.status(400).json({ error: 'missing_query' });
+  const index = loadIndex(indexPath);
+  if (!index || !index.items?.length) return res.status(404).json({ error: 'index_empty' });
+  try {
+    const results = await searchIndex({ index, apiKey: serverKey, model: embeddingsModel, query, k });
+    const context = buildContext(results, maxChars);
+    return res.json({ query, k, maxChars, context, results });
+  } catch (e) {
+    console.error('Augment error:', e);
+    return res.status(500).json({ error: 'augment_failed', message: e?.message || String(e) });
   }
 });
 
@@ -170,3 +225,35 @@ app.post('/webrtc/call', express.raw({ type: '*/*', limit: '5mb' }), async (req,
 });
 
 app.listen(port, () => console.log(`Server listening on port ${port}`));
+
+// Optionally run ingestion on server start (non-blocking). Controlled by AUTO_INGEST_ON_START.
+async function runAutoIngest() {
+  const serverKey = process.env.OPENAI_API_KEY || '';
+  if (!autoIngestOnStart) {
+    console.log('AUTO_INGEST_ON_START=false; skipping startup ingestion.');
+    return;
+  }
+  if (!serverKey) {
+    console.warn('Skipping startup ingestion: OPENAI_API_KEY not set.');
+    return;
+  }
+  try {
+    if (!fs.existsSync(pdfsDir)) {
+      console.log('Skipping startup ingestion: no data/pdfs directory.');
+      return;
+    }
+    const files = fs.readdirSync(pdfsDir).filter(f => f.toLowerCase().endsWith('.pdf'));
+    if (!files.length) {
+      console.log('Skipping startup ingestion: no PDFs in data/pdfs.');
+      return;
+    }
+    console.log('Running startup ingestion for PDFs:', files);
+    const index = await ingestPdfs({ pdfDir: pdfsDir, indexPath, apiKey: serverKey, model: embeddingsModel });
+    console.log(`Startup ingestion complete: files=${index.meta.files.length}, items=${index.items.length}`);
+  } catch (e) {
+    console.warn('Startup ingestion failed (continuing without index):', e && e.message ? e.message : e);
+  }
+}
+
+// Kick off ingestion shortly after server starts, without blocking listen
+setTimeout(() => { runAutoIngest(); }, 250);

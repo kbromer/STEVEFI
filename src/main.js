@@ -8,6 +8,87 @@ const logDiv = document.getElementById('log');
 const imageUpload = document.getElementById('imageUpload');
 
 let client = null; // will hold the RealtimeSession from the SDK
+let inFlightResponse = false;
+const queuedResponseInputs = [];
+let autoCreateResponses = true; // mirrors session.turn_detection.create_response
+let baseInstructions = '';
+let transportConnected = false;
+let pendingResponseTimer = null; // fallback timer after creating a user item
+let userDocContext = '';
+let kbContext = '';
+let suppressKBNextTurn = false;
+
+function buildInstructions() {
+  let instr = baseInstructions || '';
+  if (kbContext && kbContext.trim()) {
+    instr += `\n\n[Knowledge Base Context]\nUse the following general references to supplement your answer. Do not treat them as the user's documents.\n${kbContext}`;
+  }
+  if (userDocContext && userDocContext.trim()) {
+    instr += `\n\n[User Documents]\nThe following come from this caller's own financial documents. Treat these as primary for this caller.\n${userDocContext}`;
+  }
+  return instr.trim();
+}
+
+function sendEventSafe(evt) {
+  try {
+    if (!client || !client.transport) {
+      log('sendEvent aborted: no client/transport.');
+      return false;
+    }
+    client.transport.sendEvent(evt);
+    return true;
+  } catch (e) {
+    console.warn('sendEvent failed:', e);
+    log('sendEvent failed: ' + (e?.message || e));
+    setStatus('disconnected');
+    return false;
+  }
+}
+
+function queueOrTriggerResponse() {
+  try {
+    if (inFlightResponse) {
+      queuedResponseInputs.push(true);
+      log('Queued response until current speech finishes.');
+      return;
+    }
+    client?.transport?.sendEvent({
+      type: 'response.create',
+      response: {
+        output_modalities: ['audio']
+      },
+    });
+    log('Response requested from agent.');
+  } catch (e) {
+    console.warn('Failed to trigger response', e);
+    log('Error triggering response: ' + (e?.message || e));
+  }
+}
+
+function processQueuedResponses() {
+  try {
+    if (inFlightResponse) return;
+    const next = queuedResponseInputs.shift();
+    if (next) queueOrTriggerResponse();
+  } catch (e) {
+    console.warn('Error processing queued responses', e);
+  }
+}
+
+function scheduleResponseFallback(delayMs = 350) {
+  try {
+    if (pendingResponseTimer) { clearTimeout(pendingResponseTimer); pendingResponseTimer = null; }
+    // If the server doesn't start a response shortly, request one
+    pendingResponseTimer = setTimeout(() => {
+      pendingResponseTimer = null;
+      if (!inFlightResponse) {
+        queueOrTriggerResponse();
+      }
+    }, delayMs);
+  } catch (e) {
+    console.debug('scheduleResponseFallback error', e);
+  }
+}
 
 // Instrument RTCPeerConnection.setRemoteDescription to capture SDK internal failures.
 try {
@@ -115,6 +196,7 @@ async function startSdkSession() {
   const sessionResp = await getEphemeralSession();
   const ephemeralKey = sessionResp.apiKey || null;
   const instructions = sessionResp.instructions || 'You are a helpful assistant.';
+  baseInstructions = instructions;
   if (!ephemeralKey) throw new Error('No ephemeral key returned from /session');
 
   try {
@@ -126,7 +208,6 @@ async function startSdkSession() {
     const sdkSession = new RealtimeSession(agent);
 
     setStatus('connecting via SDK…');
-    // Pass apiKey (ephemeral key) to connect; SDK handles WebRTC internally
     await sdkSession.connect({ apiKey: ephemeralKey });
 
     client = sdkSession;
@@ -135,23 +216,150 @@ async function startSdkSession() {
     if (connectBtn) connectBtn.disabled = true;
     if (disconnectBtn) disconnectBtn.disabled = false;
 
-    // Listen for transport events to monitor document processing
-    sdkSession.transport.on('server.response.created', (event) => {
-      console.debug('Response created:', event);
-    });
-    
-    sdkSession.transport.on('server.response.done', (event) => {
-      console.debug('Response completed:', event);
-      // If we were waiting for a document response, update status
+    // Configure session to avoid interruptions and auto-responses from VAD
+    try {
+      sdkSession.transport.sendEvent({
+        type: 'session.update',
+        session: {
+          type: 'realtime',
+          audio: {
+            input: {
+              turn_detection: {
+                type: 'server_vad',
+                threshold: 0.5,
+                prefix_padding_ms: 300,
+                silence_duration_ms: 300,
+                // We'll manually create responses after injecting KB/user context
+                create_response: false,
+                // Never interrupt current agent speech
+                interrupt_response: false,
+              },
+            },
+            output: {},
+          },
+          output_modalities: ['audio'],
+        },
+      });
+      autoCreateResponses = false;
+      log('Session updated: prevent interruptions; manual responses will be created.');
+    } catch (e) {
+      console.warn('Failed to send session.update', e);
+    }
+
+    // Listen for transport events to monitor document processing (cover both server.* and plain names)
+    const markInFlight = (label, evt) => {
+      inFlightResponse = true;
+      console.debug(label, evt);
+      log(label);
+    };
+    const clearInFlight = (label, evt) => {
+      inFlightResponse = false;
+      console.debug(label, evt);
+      log(label);
       const currentStatus = document.getElementById('statusText')?.textContent || '';
-      if (currentStatus.includes('waiting for agent')) {
-        setStatus('connected');
-      }
+      if (currentStatus.includes('waiting for agent')) setStatus('connected');
+      processQueuedResponses();
+    };
+
+    // Response lifecycle
+    sdkSession.transport.on('response.created', (e) => { if (pendingResponseTimer) { clearTimeout(pendingResponseTimer); pendingResponseTimer = null; } markInFlight('response.created', e); });
+    sdkSession.transport.on('response.in_progress', (e) => markInFlight('response.in_progress', e));
+    sdkSession.transport.on('response.completed', (e) => clearInFlight('response.completed', e));
+    sdkSession.transport.on('response.done', (e) => clearInFlight('response.done', e));
+    sdkSession.transport.on('response.failed', (e) => clearInFlight('response.failed', e));
+    // Server-prefixed fallbacks (some SDKs use these)
+    sdkSession.transport.on('server.response.created', (e) => { if (pendingResponseTimer) { clearTimeout(pendingResponseTimer); pendingResponseTimer = null; } markInFlight('server.response.created', e); });
+    sdkSession.transport.on('server.response.done', (e) => clearInFlight('server.response.done', e));
+
+    // Additional helpful events
+    sdkSession.transport.on('response.output_audio_transcript.delta', (e) => {
+      try { if (e && e.delta) console.debug('[transcript]', e.delta); } catch {}
     });
-    
-    sdkSession.transport.on('server.error', (event) => {
-      console.error('Server error:', event);
-      log('Error from server: ' + JSON.stringify(event));
+    sdkSession.transport.on('response.output_audio_transcript.done', (e) => {
+      try { if (e && e.transcript) console.debug('[transcript.done]', e.transcript); } catch {}
+    });
+    sdkSession.transport.on('conversation.item.added', (e) => { try { log('conversation.item.added'); } catch {} });
+    sdkSession.transport.on('conversation.item.created', async (e) => {
+      try {
+        log('conversation.item.created');
+        // Intentionally do not trigger response here; wait for item.done
+      } catch {}
+    });
+    sdkSession.transport.on('server.conversation.item.created', (e) => {
+      try {
+        const item = e && (e.item || e.data || e.payload || e);
+        if (!autoCreateResponses && item && item.type === 'message' && item.role === 'user') {
+          log('Server user turn detected; requesting response…');
+          queueOrTriggerResponse();
+        }
+      } catch {}
+    });
+    sdkSession.transport.on('conversation.item.done', async (e) => {
+      try {
+        log('conversation.item.done');
+        const item = e && (e.item || e.data || e.payload || e);
+        if (item && item.type === 'message' && item.role === 'user') {
+          if (!suppressKBNextTurn) {
+            try {
+              const parts = Array.isArray(item.content) ? item.content : [];
+              const textParts = parts.filter(p => p && p.type === 'input_text' && p.text).map(p => p.text.trim());
+              const query = (textParts.join(' ').trim() || '').slice(0, 800);
+              if (query.length >= 8) {
+                setStatus('Retrieving KB context…');
+                const resp = await fetch('/context/augment', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ query, k: 6, maxChars: 4000 })
+                });
+                if (resp.ok) {
+                  const data = await resp.json();
+                  kbContext = data?.context || '';
+                  if (kbContext) {
+                    const instr = buildInstructions();
+                    sendEventSafe({ type: 'session.update', session: { type: 'realtime', instructions: instr } });
+                    log(`KB context applied (${kbContext.length} chars).`);
+                  }
+                } else {
+                  try { log('KB retrieval failed: ' + await resp.text()); } catch {}
+                }
+              }
+            } catch (kbErr) {
+              console.debug('KB retrieval error', kbErr);
+            }
+          } else {
+            suppressKBNextTurn = false;
+          }
+
+          if (!autoCreateResponses) {
+            log('User turn done; requesting response…');
+            queueOrTriggerResponse();
+          }
+        }
+      } catch {}
+    });
+    sdkSession.transport.on('error', (e) => {
+      inFlightResponse = false;
+      console.error('error:', e);
+      log('Error event: ' + JSON.stringify(e));
+      processQueuedResponses();
+    });
+    // Connection state hints (best-effort)
+    sdkSession.transport.on('open', () => { 
+      transportConnected = true; 
+      try { 
+        log('transport.open'); 
+        setStatus('connected');
+        if (connectBtn) connectBtn.disabled = true;
+        if (disconnectBtn) disconnectBtn.disabled = false;
+      } catch {}
+    });
+    sdkSession.transport.on('close', () => { 
+      transportConnected = false; 
+      try { 
+        log('transport.close'); 
+        setStatus('disconnected');
+        if (connectBtn) connectBtn.disabled = false;
+        if (disconnectBtn) disconnectBtn.disabled = true;
+      } catch {}
     });
 
     // Send auto-greeting message after successful connection
@@ -163,19 +371,11 @@ async function startSdkSession() {
           type: 'message',
           role: 'assistant',
           content: [
-            {
-              type: 'input_text',
-              text: 'Hi, my name is Ash with STEVE-FI. I am here to help you with financial resources and guidance. May I ask who I am speaking with?',
-            },
+            { type: 'output_text', text: 'Hi, my name is Ash with STEVE-FI. I am here to help you with financial resources and guidance. May I ask who I am speaking with?' },
           ],
         },
       });
-
-      // Trigger response creation to ensure the agent speaks the greeting
-      sdkSession.transport.sendEvent({
-        type: 'response.create',
-      });
-
+      sdkSession.transport.sendEvent({ type: 'response.create' });
       log('Greeting message sent.');
       setStatus('connected');
     } catch (greetErr) {
@@ -283,6 +483,27 @@ async function convertPdfToImages(file) {
   return images;
 }
 
+// Extract text from a PDF for use as session context
+async function extractPdfText(file) {
+  const pdfjsLib = await import('pdfjs-dist');
+  const pdfjsVersion = pdfjsLib.version || '4.0.379';
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsVersion}/build/pdf.worker.min.mjs`;
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const maxPages = Math.min(pdf.numPages, 20);
+  let text = '';
+  for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const strings = content.items.map(i => (i.str || ''));
+    text += `\n\n--- Page ${pageNum} ---\n` + strings.join(' ');
+  }
+  // Normalize whitespace and trim
+  text = text.replace(/\s+/g, ' ').trim();
+  return text;
+}
+
 if (imageUpload) {
   imageUpload.onchange = async (e) => {
     if (!client) {
@@ -290,68 +511,64 @@ if (imageUpload) {
       imageUpload.value = '';
       return;
     }
-    const file = e.target.files[0];
+    const file = e.target?.files && e.target.files[0];
     if (!file) return;
-    
     try {
-      // Check if it's a PDF
       if (file.type === 'application/pdf') {
-        setStatus('Converting PDF...');
-        log('Converting PDF to images...');
-        
-        const images = await convertPdfToImages(file);
-        log(`PDF converted: ${images.length} page(s)`);
-        
-        // Send all pages in a single message with multiple image content items
-        const content = [];
-        
-        // Add text introduction
-        content.push({
-          type: 'input_text',
-          text: `I have uploaded a PDF document with ${images.length} page(s) for you to analyze. Please review it and provide insights.`
-        });
-        
-        // Add all images with proper data URL format via image_url
-        for (let i = 0; i < images.length; i++) {
-          const { base64 } = images[i];
-          content.push({
-            type: 'input_image',
-            image_url: `data:image/png;base64,${base64}`
-          });
-        }
-
-        // Build a single message item to reuse for response input to avoid race conditions
-        const pdfMessageItem = {
-          type: 'message',
-          role: 'user',
-          content
-        };
-
-        // Send single message with all content for history, then trigger response with the same input
+        // Treat as user-provided financial document; do NOT use server KB retrieval here
         try {
-          client.transport.sendEvent({
-            type: 'conversation.item.create',
-            item: pdfMessageItem
-          });
+          setStatus('Extracting PDF text...');
+          const pdfText = await extractPdfText(file);
+          const MAX_CHARS = 20000;
+          const trimmed = pdfText.length > MAX_CHARS ? pdfText.slice(0, MAX_CHARS) + '…' : pdfText;
+          const docBlock = `\n\n[User-Provided Financial Document]\nName: ${file.name}\nInstructions: Acknowledge receipt. Analyze and summarize key findings, issues, and recommended actions. Do not ask to re-upload unless you need additional pages or documents.\nText:\n${trimmed}`;
+          userDocContext += docBlock;
+          const newInstructions = `${baseInstructions}\n\n[User Documents]\nThe following content comes from the caller's own financial documents. Use it for analysis for this caller only. Do not confuse it with general reference materials.${userDocContext}`;
+          const ok = sendEventSafe({ type: 'session.update', session: { type: 'realtime', instructions: newInstructions } });
+          if (ok) log(`Session instructions updated with user PDF context (${Math.min(pdfText.length, MAX_CHARS)} chars).`);
 
-          log('PDF pages sent to assistant for analysis.');
-
-          // Trigger a response using the same message as input to avoid timing issues
-          client.transport.sendEvent({
-            type: 'response.create',
-            response: {
-              conversation: 'none',
-              output_modalities: ['audio'],
-              input: [ pdfMessageItem ]
-            }
-          });
-          log('Response requested from agent.');
-          setStatus('PDF sent - agent should respond');
-
-        } catch (sendErr) {
-          console.error('Error sending PDF:', sendErr);
-          log('Error sending PDF: ' + (sendErr?.message || sendErr));
-          setStatus('error sending document');
+          suppressKBNextTurn = true;
+          const textOnly = {
+            type: 'message',
+            role: 'user',
+            content: [ { type: 'input_text', text: `I just uploaded my financial document (${file.name}). Please acknowledge and begin your analysis using the provided context.` } ]
+          };
+          sendEventSafe({ type: 'conversation.item.create', item: textOnly });
+          scheduleResponseFallback();
+          setStatus('PDF context applied - agent should respond');
+          return;
+        } catch (e) {
+          console.warn('PDF text extraction failed, falling back to preview:', e);
+          // As a last resort, send a small preview image only
+          try {
+            const pdfjsLib = await import('pdfjs-dist');
+            const pdfjsVersion = pdfjsLib.version || '4.0.379';
+            pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsVersion}/build/pdf.worker.min.mjs`;
+            const buf = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+            const page = await pdf.getPage(1);
+            const viewport = page.getViewport({ scale: 1.0 });
+            const canvas = document.createElement('canvas');
+            const ctx2d = canvas.getContext('2d');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            await page.render({ canvasContext: ctx2d, viewport }).promise;
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+            const content = [ { type: 'input_text', text: `Here is a preview of my financial document (${file.name}). Please analyze and advise.` } ];
+            if (dataUrl) content.push({ type: 'input_image', image_url: String(dataUrl) });
+            const previewMsg = { type: 'message', role: 'user', content };
+            sendEventSafe({ type: 'conversation.item.create', item: previewMsg });
+            scheduleResponseFallback();
+            setStatus('PDF sent - agent should respond');
+            return;
+          } catch (previewErr) {
+            console.warn('Preview generation failed:', previewErr);
+            const textOnly = { type: 'message', role: 'user', content: [ { type: 'input_text', text: `I uploaded a financial PDF (${file.name}). Please analyze and advise.` } ] };
+            sendEventSafe({ type: 'conversation.item.create', item: textOnly });
+            scheduleResponseFallback();
+            setStatus('PDF sent - agent should respond');
+            return;
+          }
         }
       } else {
         // Handle regular images
@@ -361,6 +578,7 @@ if (imageUpload) {
           const dataUrl = reader.result; // Already in the format: data:image/...;base64,...
           if (!dataUrl) { log('Could not read image data.'); return; }
           try {
+            suppressKBNextTurn = true;
             const imageMessageItem = {
               type: 'message',
               role: 'user',
@@ -370,29 +588,18 @@ if (imageUpload) {
               ]
             };
 
-            // Add to conversation history
-            client.transport.sendEvent({
+            sendEventSafe({
               type: 'conversation.item.create',
               item: imageMessageItem
             });
 
             log('Document sent to assistant for analysis.');
-
-            // Trigger a response using the same message as input (out-of-band)
-            client.transport.sendEvent({
-              type: 'response.create',
-              response: {
-                conversation: 'none',
-                output_modalities: ['audio'],
-                input: [ imageMessageItem ]
-              }
-            });
-            log('Response requested from agent.');
+            // Use fallback timer to avoid creating a response while one is active
+            scheduleResponseFallback();
             setStatus('Image sent - agent should respond');
-
           } catch (e) {
-            console.warn('Error sending image to SDK session', e);
-            log('Error: ' + (e?.message || e));
+            console.error('Error preparing/sending image message:', e);
+            log('Error sending image: ' + (e?.message || e));
             setStatus('error sending document');
           }
         };
