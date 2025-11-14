@@ -30,6 +30,17 @@ try {
 
 app.use(express.static(path.join(__dirname, 'dist')));
 
+// Serve images from root images directory
+app.use('/images', express.static(path.join(__dirname, 'images')));
+
+// Serve PDFs from data/pdfs directory
+app.use('/pdfs', express.static(path.join(__dirname, 'data', 'pdfs')));
+
+// Serve about.html from root directory
+app.get('/about.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'about.html'));
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });

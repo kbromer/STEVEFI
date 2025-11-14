@@ -17,6 +17,15 @@ let pendingResponseTimer = null; // fallback timer after creating a user item
 let userDocContext = '';
 let kbContext = '';
 let suppressKBNextTurn = false;
+const EXPECTED_GREETING = 'Hi, my name is Ash with STEVE-FI. I am here to help you with financial resources and guidance. May I ask who I am speaking with?';
+let EXPECTED_GREETING_NORM = '';
+let greetingGuardActive = false;
+let greetingAccum = '';
+let greetingRetries = 0;
+const GREETING_MAX_RETRIES = 2;
+let greetingRestorePending = false;
+let greetingPrevInstructions = '';
+// First-greeting flags are not required anymore; rely on deterministic assistant message
 
 function buildInstructions() {
   let instr = baseInstructions || '';
@@ -49,7 +58,7 @@ function queueOrTriggerResponse() {
   try {
     if (inFlightResponse) {
       queuedResponseInputs.push(true);
-      log('Queued response until current speech finishes.');
+      //log('Queued response until current speech finishes.');
       return;
     }
     client?.transport?.sendEvent({
@@ -209,7 +218,7 @@ async function startSdkSession() {
     const sdk = await import('@openai/agents-realtime');
     const { RealtimeAgent, RealtimeSession } = sdk;
 
-    const agent = new RealtimeAgent({ name: 'Assistant', instructions });
+    const agent = new RealtimeAgent({ name: 'Ash', instructions });
     const sdkSession = new RealtimeSession(agent);
 
     setStatus('Establishing secure connection…');
@@ -266,11 +275,67 @@ async function startSdkSession() {
     sdkSession.transport.on('response.created', (e) => { if (pendingResponseTimer) { clearTimeout(pendingResponseTimer); pendingResponseTimer = null; } markInFlight('response.created', e); });
     sdkSession.transport.on('response.in_progress', (e) => markInFlight('response.in_progress', e));
     sdkSession.transport.on('response.completed', (e) => clearInFlight('response.completed', e));
-    sdkSession.transport.on('response.done', (e) => clearInFlight('response.done', e));
+    sdkSession.transport.on('response.done', (e) => {
+      clearInFlight('response.done', e);
+      // After the first strict greeting finishes, restore normal instructions
+      if (greetingRestorePending) {
+        greetingRestorePending = false;
+        const instr = buildInstructions();
+        sendEventSafe({ type: 'session.update', session: { type: 'realtime', instructions: instr } });
+      }
+    });
     sdkSession.transport.on('response.failed', (e) => clearInFlight('response.failed', e));
     // Server-prefixed fallbacks (some SDKs use these)
     sdkSession.transport.on('server.response.created', (e) => { if (pendingResponseTimer) { clearTimeout(pendingResponseTimer); pendingResponseTimer = null; } markInFlight('server.response.created', e); });
     sdkSession.transport.on('server.response.done', (e) => clearInFlight('server.response.done', e));
+
+    // Transcript guard helpers for first greeting
+    function normalizeText(s) {
+      try {
+        return String(s)
+          .toLowerCase()
+          .replace(/[\-_/]/g, ' ')
+          .replace(/[^a-z0-9 ]+/g, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+      } catch { return ''; }
+    }
+    function sendFixedGreeting() {
+      try {
+        sdkSession.transport.sendEvent({
+          type: 'conversation.item.create',
+          item: {
+            type: 'message',
+            role: 'assistant',
+            content: [ { type: 'output_text', text: EXPECTED_GREETING } ],
+          },
+        });
+        sdkSession.transport.sendEvent({ type: 'response.create', response: { output_modalities: ['audio'] } });
+      } catch {}
+    }
+
+    sdkSession.transport.on('response.output_audio_transcript.delta', (e) => {
+      try {
+        if (!e || !e.delta) return;
+        if (!greetingGuardActive) return;
+        greetingAccum += String(e.delta);
+        const normAccum = normalizeText(greetingAccum);
+        if (!EXPECTED_GREETING_NORM) EXPECTED_GREETING_NORM = normalizeText(EXPECTED_GREETING);
+        const expectedPrefix = EXPECTED_GREETING_NORM.slice(0, normAccum.length);
+        if (normAccum && normAccum !== expectedPrefix) {
+          if (greetingRetries < GREETING_MAX_RETRIES) {
+            greetingRetries++;
+            sendEventSafe({ type: 'response.cancel' });
+            greetingAccum = '';
+            sendFixedGreeting();
+            return;
+          } else {
+            greetingGuardActive = false;
+          }
+        }
+      } catch {}
+    });
+    sdkSession.transport.on('response.output_audio_transcript.done', (e) => { try { if (greetingGuardActive) greetingGuardActive = false; } catch {} });
 
     // Additional helpful events
     sdkSession.transport.on('conversation.item.added', (e) => { try { /* log('conversation.item.added'); */ } catch {} });
@@ -355,24 +420,20 @@ async function startSdkSession() {
       } catch {}
     });
 
-    // Send staged greeting after connection
+    // Send staged greeting after connection as an assistant message, then create audio response
     try {
       setStatus('Ash is joining the call…');
       await new Promise(res => setTimeout(res, 1200));
-      sdkSession.transport.sendEvent({
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'assistant',
-          content: [
-            { type: 'output_text', text: 'Hi, my name is Ash with STEVE-FI. I am here to help you with financial resources and guidance. May I ask who I am speaking with?' },
-          ],
-        },
-      });
-      sdkSession.transport.sendEvent({ type: 'response.create' });
+      // Temporarily tighten instructions for the first spoken response only
+      greetingPrevInstructions = baseInstructions;
+      const strictGreeting = `${baseInstructions}\n\nFor your next response only, speak exactly this sentence and nothing else. Do not infer or use a caller name. Do not add any extra words before or after.\n\n"${EXPECTED_GREETING}"`;
+      sendEventSafe({ type: 'session.update', session: { type: 'realtime', instructions: strictGreeting } });
+      greetingRestorePending = true;
+      // Create a response without adding a conversation item so the model reads exactly the instruction
+      sdkSession.transport.sendEvent({ type: 'response.create', response: { output_modalities: ['audio'] } });
       setStatus('connected');
     } catch (greetErr) {
-      // console.warn('Error sending greeting:', greetErr); // Silenced for cleaner UI
+      // Silenced for cleaner UI
       log('Note: Greeting could not be sent, but session is connected.');
     }
   } catch (err) {
@@ -407,7 +468,7 @@ if (disconnectBtn) {
         if (typeof client.disconnect === 'function') {
           try { 
             await client.disconnect(); 
-            log('Disconnected via SDK.');
+            log('Phone call disconnected...');
           } catch (e) { 
             console.warn('Error calling disconnect():', e); 
             log('Warning: error during disconnect: ' + (e && e.message ? e.message : e));
@@ -416,7 +477,7 @@ if (disconnectBtn) {
           // Fallback: try close() if disconnect doesn't exist
           try { 
             await client.close(); 
-            log('Closed via SDK.');
+            log('Phone call disconnected..');
           } catch (e) { 
             console.warn('Error calling close():', e); 
           }
